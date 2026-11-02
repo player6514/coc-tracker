@@ -590,7 +590,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v24';
+const APP_VERSION = 'v25';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -705,9 +705,15 @@ function render() {
         .map(m => `<div class="hint">${escapeHtml(m.name)}：实测 <b style="color:var(--accent)">${m.rate.toFixed(2)}×</b>（${m.dt} 秒里减少 ${m.db} 秒）</div>`)
         .join('');
       const top = state.measure.slice().sort((a, b) => b.rate - a.rate)[0];
+      const prevTasks = (state.prev && state.prev.tasks) ? state.prev.tasks : [];
+      const curTasks = (state.snapshot && state.snapshot.tasks) ? state.snapshot.tasks : [];
+      const hadBoost = prevTasks.some(x => String(x.key || '').indexOf('boost:') === 0)
+        || curTasks.some(x => x.group === 'boost');
       const note = !top ? '' : (top.rate < 1.4
-        ? '存档里的 timer 已经是真实时间（加速已算进去），应把「折算」关掉'
-        : `存档里的 timer 是未加速的工作量，倍率约 ${top.rate.toFixed(1)}×`);
+        ? (hadBoost
+            ? '⚠️ 这段有加速在生效却只测到 1.0×：说明存档已算过加速，应把「折算」关掉'
+            : '这次比对期间没有加速在生效，1.0× 是正常的（不代表存档已含加速）')
+        : `有加速在生效，实测约 ${top.rate.toFixed(1)}×：存档给的是未加速的工作量，折算保持开启`);
       mbox.innerHTML = `<div style="border-top:1px solid var(--line);padding-top:14px"><h2>📐 实测速率（两次存档对比）</h2>${rows}<div class="hint" style="margin-top:8px;color:var(--muted)">${note}</div></div>`;
     } else {
       mbox.innerHTML = '';
