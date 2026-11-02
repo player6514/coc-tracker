@@ -584,7 +584,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v22';
+const APP_VERSION = 'v23';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -981,8 +981,12 @@ async function scheduleAll(force) {
   // 每次导入都以最新 JSON 为准：先把本主题下还没到点的排程全部撤回
   const partial = !!(state.snapshot && state.snapshot.repaired);
   const pending = partial ? [] : state.scheduled.filter(s => s && s.topic === state.config.topic && s.at > now);
+  let cancelFail = 0;
   if (pending.length) {
-    for (const old of pending) await cancelMessage(old.id);
+    for (const old of pending) {
+      const ok = await cancelMessage(old.id);
+      if (!ok) cancelFail++;
+    }
     state.scheduled = state.scheduled.filter(s => !(s && s.topic === state.config.topic && s.at > now));
     save(LS.sched, state.scheduled);
   }
@@ -1043,9 +1047,10 @@ async function scheduleAll(force) {
   render();
   const hint = $('settingsHint');
   if (hint) {
-    hint.textContent = sent
+    hint.textContent = (sent
       ? `已排程 ${sent} 条通知${longOnes ? `（其中 ${longOnes} 项超过 3 天，先提醒你刷新）` : ''}。`
-      : '本次没有新的排程（已经排过，或没有进行中的任务）。';
+      : '本次没有新的排程（已经排过，或没有进行中的任务）。') +
+      (cancelFail ? `\n有 ${cancelFail} 条旧提醒撤回失败（浏览器限制），可能会重复收到。` : '');
   }
   return { sent, longOnes };
 }
