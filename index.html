@@ -590,7 +590,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v25';
+const APP_VERSION = 'v26';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -724,7 +724,7 @@ function render() {
   const sbox = $('schedLogBox');
   if (sbox) {
     if (state.schedLog && state.schedLog.length) {
-      const rows = state.schedLog.slice().reverse().slice(0, 8).map(x => {
+      const rows = state.schedLog.slice().reverse().slice(0, 20).map(x => {
         const tm = new Date(x.t);
         const hh = String(tm.getHours()).padStart(2, '0') + ':' + String(tm.getMinutes()).padStart(2, '0');
         return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${x.ok ? '✅' : '❌失败'}</div>`;
@@ -1300,7 +1300,7 @@ function bindEvents() {
   $('btnResched').onclick = async () => {
     state.scheduled = [];
     save(LS.sched, state.scheduled);
-    const r = await scheduleAll();
+    const r = await scheduleAll(true);
     toast(`已重新排程 ${r.sent} 条`);
   };
 
