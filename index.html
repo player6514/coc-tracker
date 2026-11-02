@@ -199,6 +199,12 @@
         </div>
       </div>
 
+      <div class="hint" style="margin-top:10px">药水/大餐到点时是否提醒</div>
+      <div class="seg" id="segNotifyBoost" style="margin-top:6px">
+        <button data-nb="1">提醒</button>
+        <button data-nb="0">不提醒</button>
+      </div>
+
       <div class="hint" style="margin-top:10px">倒计时是否按加速折算</div>
       <div class="seg" id="segBoost" style="margin-top:6px">
         <button data-boost="1">折算（推荐）</button>
@@ -597,6 +603,7 @@ let state = {
     label: '',
     mults: Object.assign({}, DEFAULT_MULTS),
     boost: true,
+    notifyBoost: true,
     stackMode: 'max',
     manualBoost: { min: 0, kind: 'builder' }
   }, load(LS.config, {})),
@@ -765,7 +772,7 @@ function taskHtml(t, now, isDone) {
     : 100 * (1 - remain / (t.initialSec * 1000))));
   const name = escapeHtml(displayName(t));
   const lvTxt = t.lvl ? `<span class="lv">Lv${t.lvl}${t.cooldown ? ' · 冷却' : ' → ' + (t.lvl + 1)}</span>` : '';
-  const isScheduled = state.scheduled.some(s => s && s.key === t.key);
+  const isScheduled = state.scheduled.some(s => s && s.key === t.key && s.topic === state.config.topic);
   const schedTag = isDone ? '' :
     (t.finishMs - now > MAX_DELAY_MS
       ? `<span class="pill warn">长任务 · 3天后先提醒刷新</span>`
@@ -894,6 +901,7 @@ function doParse(text, force) {
     scanned: parsed.scanned,
     tasks: parsed.tasks,
     raw: String(text).slice(0, 1000000),
+    repaired: !!parsed.repaired,
     v: APP_VERSION
   };
   save(LS.snapshot, state.snapshot);
@@ -919,17 +927,39 @@ function pushUrl(opts) {
 async function send(opts) {
   const url = pushUrl(opts);
   try {
-    // no-cors：file:// 打开也能发出去，只是读不到响应
-    await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+    const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+    if (res && res.ok) {
+      let id = '';
+      try { const j = await res.json(); id = (j && j.id) || ''; } catch (e) {}
+      return { ok: true, id };
+    }
+    return { ok: false, id: '' };
+  } catch (e) {
+    // 被 CORS 拦下时退回 no-cors：消息照样发，只是拿不到 id
+    try {
+      await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+      return { ok: true, id: '' };
+    } catch (e2) {
+      return { ok: false, id: '' };
+    }
+  }
+}
+
+// 撤回一条已排程的消息（同一主题下）
+async function cancelMessage(id) {
+  if (!id) return false;
+  const srv = (state.config.server || 'https://ntfy.sh').replace(/\/+$/, '');
+  try {
+    await fetch(`${srv}/${encodeURIComponent(state.config.topic)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
     return true;
   } catch (e) {
-    console.warn('push failed', e);
     return false;
   }
 }
 
 function alreadyScheduled(task, at) {
-  return state.scheduled.some(s => s && s.key === task.key && Math.abs(s.at - at) < 10 * 60000);
+  const topic = state.config.topic;
+  return state.scheduled.some(s => s && s.key === task.key && s.topic === topic && Math.abs(s.at - at) < 10 * 60000);
 }
 
 function pruneScheduled(now) {
@@ -949,10 +979,21 @@ async function scheduleAll(force) {
 
   const now = Date.now();
   pruneScheduled(now);
+
+  // 每次导入都以最新 JSON 为准：先把本主题下还没到点的排程全部撤回
+  const partial = !!(state.snapshot && state.snapshot.repaired);
+  const pending = partial ? [] : state.scheduled.filter(s => s && s.topic === state.config.topic && s.at > now);
+  if (pending.length) {
+    for (const old of pending) await cancelMessage(old.id);
+    state.scheduled = state.scheduled.filter(s => !(s && s.topic === state.config.topic && s.at > now));
+    save(LS.sched, state.scheduled);
+  }
+
   let sent = 0, longOnes = 0;
 
   for (const t of tasks) {
     if (t.finishMs <= now + 2000) continue;
+    if (t.group === 'boost' && state.config.notifyBoost === false) continue;
 
     let at = t.finishMs - (state.config.lead || 0) * 60000;
     let note = '升级完成，可以上线了';
@@ -968,25 +1009,33 @@ async function scheduleAll(force) {
 
     if (alreadyScheduled(t, at)) continue;
 
+    // 同一任务的旧排程（时间不同）先撤回，避免“第一瓶结束”这种中途提醒
+    const stale = state.scheduled.filter(s => s && s.key === t.key
+      && s.topic === state.config.topic && s.at > now && Math.abs(s.at - at) >= 10 * 60000);
+    for (const old of stale) {
+      await cancelMessage(old.id);
+      state.scheduled = state.scheduled.filter(x => x !== old);
+    }
+
     const title = isLong
       ? `⏳ ${displayName(t)} 还没好，记得刷新排程`
       : t.cooldown
-        ? (t.group === 'boost' ? `⏰ ${displayName(t)} 已结束` : `⏰ ${displayName(t)} 冷却结束`)
+        ? (t.group === 'boost' ? `⏰ ${displayName(t)} 这一瓶结束` : `⏰ ${displayName(t)} 冷却结束`)
         : `✅ ${displayName(t)}${t.lvl ? ' Lv' + t.lvl + '→' + (t.lvl + 1) : ''} 完成`;
     const body = isLong
       ? `${displayName(t)} 剩余约 ${fmtRemain(t.finishMs - now)}。\n${note}`
       : t.group === 'boost'
-        ? `${displayName(t)} 已经结束了`
+        ? `${displayName(t)} 这一瓶已经到时间了。如果还排着下一瓶，加速会继续，游戏里看剩余即可。`
         : `${t.groupLabel}${t.lvl && !t.cooldown ? ' · 升到 Lv' + (t.lvl + 1) : ''} · ${note}`;
 
-    const ok = await send({
+    const r = await send({
       title, message: body,
       tags: isLong ? 'hourglass' : 'tada,castle',
       priority: isLong ? 3 : 4,
       at
     });
-    if (ok) {
-      state.scheduled.push({ key: t.key, at });
+    if (r && r.ok) {
+      state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '' });
       sent++;
     }
     await new Promise(r => setTimeout(r, 250)); // 别撞 ntfy 限速
@@ -1015,6 +1064,9 @@ function openSettings() {
   });
   document.querySelectorAll('#segStack button').forEach(b => {
     b.classList.toggle('on', b.dataset.stack === (state.config.stackMode || 'max'));
+  });
+  document.querySelectorAll('#segNotifyBoost button').forEach(b => {
+    b.classList.toggle('on', (b.dataset.nb === '1') === (state.config.notifyBoost !== false));
   });
   if ($('manualBoostMin')) $('manualBoostMin').value = Number(state.config.manualBoost.min) || 0;
   if ($('manualBoostKind')) $('manualBoostKind').value = state.config.manualBoost.kind || 'builder';
@@ -1104,9 +1156,13 @@ function bindEvents() {
 
 
   $('topicInput').oninput = e => {
+    const old = state.config.topic;
     state.config.topic = e.target.value.trim().replace(/[^A-Za-z0-9_-]/g, '');
     e.target.value = state.config.topic;
     save(LS.config, state.config);
+    if (old && old !== state.config.topic) {
+      toast('主题已改：旧主题上收到的提醒请到 ntfy App 里取消订阅');
+    }
   };
   $('serverInput').oninput = e => {
     state.config.server = e.target.value.trim() || 'https://ntfy.sh';
@@ -1134,6 +1190,15 @@ function bindEvents() {
       save(LS.config, state.config);
     };
   }
+
+  document.querySelectorAll('#segNotifyBoost button').forEach(b => {
+    b.onclick = () => {
+      state.config.notifyBoost = b.dataset.nb === '1';
+      save(LS.config, state.config);
+      document.querySelectorAll('#segNotifyBoost button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+    };
+  });
 
   document.querySelectorAll('#segStack button').forEach(b => {
     b.onclick = () => {
@@ -1174,13 +1239,13 @@ function bindEvents() {
   });
 
   $('btnTest').onclick = async () => {
-    const ok = await send({
+    const r = await send({
       title: '✅ 村庄监工 · 测试通知',
       message: `如果你在手机上看到这条，说明通道已通。\n主题：${state.config.topic}`,
       tags: 'white_check_mark,castle',
       priority: 4
     });
-    toast(ok ? '已发送，看看手机通知栏' : '发送失败，检查网络');
+    toast(r && r.ok ? '已发送，看看手机通知栏' : '发送失败，检查网络');
   };
 
   $('btnReparse').onclick = () => {
