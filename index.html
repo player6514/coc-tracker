@@ -233,6 +233,10 @@
   </div>
 </div>
 
+<footer style="text-align:center;color:var(--muted);font-size:11px;padding:18px 0 8px;letter-spacing:.3px">
+  <span id="verText">村庄监工</span>
+</footer>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -580,7 +584,8 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v5';
+const APP_VERSION = 'v22';
+const BUILD_DATE = '2026-11-02';
 
 const LS = {
   snapshot: 'coc.snapshot.v2',
@@ -653,7 +658,7 @@ function toast(msg) {
 const TAB_EMPTY = {
   home: '主世界没有正在升级的项目',
   lab: '战宠、兵种、法术都没有在升级',
-  helper: '帮手小屋没有在倒计时的项目',
+  helper: '帮手小屋没有在冷却的助手',
   boost: '没有正在生效的加速'
 };
 
@@ -661,7 +666,7 @@ function inTab(tab, t) {
   if (tab === 'home') return t.group === 'buildings' || t.group === 'traps' || t.group === 'heroes';
   if (tab === 'lab') return t.group === 'pets' || t.group === 'units' || t.group === 'spells'
     || t.group === 'siege_machines' || t.group === 'equipment';
-  if (tab === 'helper') return t.group === 'helpers' || t.group === 'guardians';
+  if (tab === 'helper') return (t.group === 'helpers' || t.group === 'guardians') && t.cooldown;
   return t.group === 'boost';
 }
 
@@ -728,14 +733,7 @@ function render() {
   let html = '';
 
   if (tab === 'helper') {
-    const work = curActive.filter(t => !t.cooldown);
-    const cool = curActive.filter(t => t.cooldown);
-    html += '<h2>正在工作</h2>';
-    html += work.length ? work.map(t => taskHtml(t, now, false)).join('')
-      : '<div class="empty">没有正在工作的帮手</div>';
-    html += '<h2 style="margin-top:18px">冷却中</h2>';
-    html += cool.length ? cool.map(t => taskHtml(t, now, false)).join('')
-      : '<div class="empty">没有冷却中的帮手</div>';
+    html += curActive.map(t => taskHtml(t, now, false)).join('');
   } else {
     html += curActive.map(t => taskHtml(t, now, false)).join('');
     if (!curActive.length) html += `<div class="empty">${TAB_EMPTY[tab] || ''}</div>`;
@@ -1280,6 +1278,7 @@ function updateSubtitle() {
 /* ---------- 启动 ---------- */
 bindEvents();
 updateSubtitle();
+if ($('verText')) $('verText').textContent = `村庄监工 ${APP_VERSION} · 构建 ${BUILD_DATE}`;
 render();
 setInterval(() => {
   if (state.snapshot && state.snapshot.tasks) render();
