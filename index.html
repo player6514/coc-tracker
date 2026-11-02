@@ -226,6 +226,8 @@
 
     <div id="measureBox" style="margin-top:16px"></div>
 
+    <div id="schedLogBox" style="margin-top:16px"></div>
+
     <div style="border-top:1px solid var(--line);margin:18px 0 0;padding-top:14px">
       <div class="hint" style="margin-bottom:8px">清空本地数据（不影响游戏）</div>
       <button class="btn ghost small" id="btnClear">清空并重置</button>
@@ -574,17 +576,21 @@ function fmtClock(ms, nowMs) {
   const n = new Date(nowMs === undefined ? Date.now() : nowMs);
   const pad = x => String(x).padStart(2, '0');
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const sameDay = d.toDateString() === n.toDateString();
-  const t = new Date(n.getTime() + 86400000);
-  const isTomorrow = d.toDateString() === t.toDateString();
-  if (sameDay) return `今天 ${hm}`;
-  if (isTomorrow) return `明天 ${hm}`;
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+  const startOfDay = x => { const t = new Date(x); t.setHours(0, 0, 0, 0); return t.getTime(); };
+  const diff = Math.round((startOfDay(ms) - startOfDay(n.getTime())) / 86400000);
+  if (diff === 0) return `今天 ${hm}`;
+  if (diff === 1) return `明天 ${hm}`;
+  if (diff < 0) return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+  const wd = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()];
+  const todayIdx = (n.getDay() + 6) % 7;           // 周一 = 0
+  const week = Math.floor((todayIdx + diff) / 7);   // 0=这周 1=下周 2=下下周
+  const prefix = week === 0 ? '这' : week === 1 ? '下' : week === 2 ? '下下' : `${week}周后的`;
+  return `${prefix}${wd} ${hm}`;
 }
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v23';
+const APP_VERSION = 'v24';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -593,6 +599,7 @@ const LS = {
   names:    'coc.names.v2',
   sched:    'coc.sched.v2',
   prev:     'coc.prev.v1',
+  log:      'coc.log.v1',
   tab:      'coc.tab.v1'
 };
 const MAX_DELAY_MS = 3 * 86400000 - 120000; // ntfy 最多 3 天
@@ -615,6 +622,7 @@ let state = {
   names: load(LS.names, {}),
   scheduled: load(LS.sched, []),
   prev: load(LS.prev, null),
+  schedLog: load(LS.log, []),
   tab: load(LS.tab, 'home'),
   measure: []
 };
@@ -703,6 +711,21 @@ function render() {
       mbox.innerHTML = `<div style="border-top:1px solid var(--line);padding-top:14px"><h2>📐 实测速率（两次存档对比）</h2>${rows}<div class="hint" style="margin-top:8px;color:var(--muted)">${note}</div></div>`;
     } else {
       mbox.innerHTML = '';
+    }
+  }
+
+  // 排程日志（设置面板里）
+  const sbox = $('schedLogBox');
+  if (sbox) {
+    if (state.schedLog && state.schedLog.length) {
+      const rows = state.schedLog.slice().reverse().slice(0, 8).map(x => {
+        const tm = new Date(x.t);
+        const hh = String(tm.getHours()).padStart(2, '0') + ':' + String(tm.getMinutes()).padStart(2, '0');
+        return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${x.ok ? '✅' : '❌失败'}</div>`;
+      }).join('');
+      sbox.innerHTML = `<h2>🧾 最近排程记录</h2>${rows}`;
+    } else {
+      sbox.innerHTML = '';
     }
   }
 
@@ -989,6 +1012,7 @@ async function scheduleAll(force) {
     }
     state.scheduled = state.scheduled.filter(s => !(s && s.topic === state.config.topic && s.at > now));
     save(LS.sched, state.scheduled);
+  save(LS.log, state.schedLog);
   }
 
   let sent = 0, longOnes = 0;
@@ -1031,7 +1055,7 @@ async function scheduleAll(force) {
         : `${t.groupLabel}${t.lvl && !t.cooldown ? ' · 升到 Lv' + (t.lvl + 1) : ''} · ${note}`;
 
     const r = await send({
-      title, message: body,
+      title, message: body + '\n（' + APP_VERSION + '）',
       tags: isLong ? 'hourglass' : 'tada,castle',
       priority: isLong ? 3 : 4,
       at
@@ -1040,7 +1064,15 @@ async function scheduleAll(force) {
       state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '' });
       sent++;
     }
-    await new Promise(r => setTimeout(r, 250)); // 别撞 ntfy 限速
+    state.schedLog.push({
+      t: Date.now(),
+      name: displayName(t),
+      at,
+      ok: !!(r && r.ok),
+      id: (r && r.id) || ''
+    });
+    if (state.schedLog.length > 20) state.schedLog = state.schedLog.slice(-20);
+    await new Promise(r => setTimeout(r, 40)); // 别撞 ntfy 限速，也别让用户等太久
   }
 
   save(LS.sched, state.scheduled);
