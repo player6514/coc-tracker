@@ -590,7 +590,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v27';
+const APP_VERSION = 'v28';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -600,6 +600,7 @@ const LS = {
   sched:    'coc.sched.v2',
   prev:     'coc.prev.v1',
   log:      'coc.log.v1',
+  lastRun:  'coc.lastrun.v1',
   tab:      'coc.tab.v1'
 };
 const MAX_DELAY_MS = 3 * 86400000 - 120000; // ntfy 最多 3 天
@@ -623,6 +624,7 @@ let state = {
   scheduled: load(LS.sched, []),
   prev: load(LS.prev, null),
   schedLog: load(LS.log, []),
+  lastRun: load(LS.lastRun, null),
   tab: load(LS.tab, 'home'),
   measure: []
 };
@@ -630,6 +632,7 @@ save(LS.config, state.config);
 
 // 旧版本存的数据没有原始 JSON，升级后自动重解析一次，避免看不到新字段
 let NEED_RESCHED = false;
+let RESCHED_TIMER = null;
 
 function migrateSnapshot() {
   const s = state.snapshot;
@@ -732,7 +735,11 @@ function render() {
         const hh = String(tm.getHours()).padStart(2, '0') + ':' + String(tm.getMinutes()).padStart(2, '0');
         return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${x.ok ? '✅' : '❌失败'}</div>`;
       }).join('');
-      sbox.innerHTML = `<h2>🧾 最近排程记录</h2>${rows}`;
+      const lr = state.lastRun;
+      const head = lr
+        ? `<div class="hint" style="margin-bottom:6px">本次成功 ${lr.sent} 条${lr.fail ? `，撤回失败 ${lr.fail} 条` : ''}</div>`
+        : '';
+      sbox.innerHTML = `<h2>🧾 本次排程记录</h2>${head}${rows}`;
     } else {
       sbox.innerHTML = '';
     }
@@ -866,6 +873,8 @@ function dismissTask(key) {
 }
 
 function doParse(text, force) {
+  // 手动导入优先，取消还没跑的自动重排
+  if (RESCHED_TIMER) { clearTimeout(RESCHED_TIMER); RESCHED_TIMER = null; }
   if (!text || !text.trim()) { toast('先粘贴 JSON'); return; }
   let parsed;
   try {
@@ -1021,9 +1030,10 @@ async function scheduleAll(force) {
     }
     state.scheduled = state.scheduled.filter(s => !(s && s.topic === state.config.topic && s.at > now));
     save(LS.sched, state.scheduled);
-  save(LS.log, state.schedLog);
   }
 
+  const prevRun = state.lastRun || null;
+  state.schedLog = [];
   let sent = 0, longOnes = 0;
 
   for (const t of tasks) {
@@ -1084,7 +1094,10 @@ async function scheduleAll(force) {
     await new Promise(r => setTimeout(r, 40)); // 别撞 ntfy 限速，也别让用户等太久
   }
 
+  state.lastRun = { sent, fail: cancelFail, at: Date.now() };
   save(LS.sched, state.scheduled);
+  save(LS.log, state.schedLog);
+  save(LS.lastRun, state.lastRun);
   render();
   const hint = $('settingsHint');
   if (hint) {
@@ -1329,7 +1342,8 @@ render();
 
 // 换了新版本：按新版规则把排程重建一遍（带新版号，旧排程会被撤回）
 if (NEED_RESCHED && state.snapshot && state.snapshot.raw) {
-  setTimeout(() => {
+  RESCHED_TIMER = setTimeout(() => {
+    RESCHED_TIMER = null;
     doParse(state.snapshot.raw, true);
     toast('已按 ' + APP_VERSION + ' 重建排程');
   }, 1200);
