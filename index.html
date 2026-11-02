@@ -590,7 +590,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v26';
+const APP_VERSION = 'v27';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -629,9 +629,12 @@ let state = {
 save(LS.config, state.config);
 
 // 旧版本存的数据没有原始 JSON，升级后自动重解析一次，避免看不到新字段
+let NEED_RESCHED = false;
+
 function migrateSnapshot() {
   const s = state.snapshot;
   if (!s || !s.raw || s.v === APP_VERSION) return;
+  NEED_RESCHED = true;
   try {
     const mset = Object.assign({ __mode: state.config.stackMode || 'max' }, state.config.mults);
     const p = parseVillage(s.raw, mset, state.config.boost !== false, state.config.manualBoost);
@@ -1323,6 +1326,14 @@ bindEvents();
 updateSubtitle();
 if ($('verText')) $('verText').textContent = `村庄监工 ${APP_VERSION} · 构建 ${BUILD_DATE}`;
 render();
+
+// 换了新版本：按新版规则把排程重建一遍（带新版号，旧排程会被撤回）
+if (NEED_RESCHED && state.snapshot && state.snapshot.raw) {
+  setTimeout(() => {
+    doParse(state.snapshot.raw, true);
+    toast('已按 ' + APP_VERSION + ' 重建排程');
+  }, 1200);
+}
 setInterval(() => {
   if (state.snapshot && state.snapshot.tasks) render();
 }, 1000);
