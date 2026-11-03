@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v43';
+const APP_VERSION = 'v44';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -1104,9 +1104,9 @@ async function send(opts) {
     if (res && res.ok) {
       let id = '';
       try { const j = await res.json(); id = (j && j.id) || ''; } catch (e) {}
-      return { ok: true, id };
+      return { ok: true, id, status: res.status };
     }
-    return { ok: false, id: '' };
+    return { ok: false, id: '', status: res ? res.status : 0 };
   } catch (e) {
     // 被 CORS 拦下时退回 no-cors：消息照样发，只是拿不到 id
     try {
@@ -1153,49 +1153,65 @@ async function scheduleAll(force) {
   const now = Date.now();
   pruneScheduled(now);
 
-  // 每次导入都以最新 JSON 为准：先把本主题下还没到点的排程全部撤回
+  // 以最新 JSON 为准，但只处理“变化的部分”：
+  //   - 任务还在、时间没变 -> 保留原排程，不动（省请求，避免被 ntfy 限速）
+  //   - 任务时间变了       -> 撤回旧的重排
+  //   - 任务已经不存在     -> 撤回
   const partial = !!(state.snapshot && state.snapshot.repaired);
-  const pending = partial ? [] : state.scheduled.filter(s => s && s.topic === state.config.topic && s.at > now);
   let cancelFail = 0;
-  if (pending.length) {
-    for (const old of pending) {
-      const ok = await cancelMessage(old.id);
-      if (!ok) cancelFail++;
-    }
-    state.scheduled = state.scheduled.filter(s => !(s && s.topic === state.config.topic && s.at > now));
-    save(LS.sched, state.scheduled);
-  }
+  const desired = {};
 
   const prevRun = state.lastRun || null;
   state.schedLog = [];
   let sent = 0, longOnes = 0;
 
+  // 1) 先算出每条任务的目标时间
+  const plan = [];
   for (const t of tasks) {
     if (t.finishMs <= now + 2000) continue;
     if (t.group === 'boost' && state.config.notifyBoost === false) continue;
 
     let at = t.finishMs - (state.config.lead || 0) * 60000;
-    let note = '升级完成，可以上线了';
     let isLong = false;
-
-    if (at - now > MAX_DELAY_MS) {
-      at = now + MAX_DELAY_MS;
-      isLong = true;
-      longOnes++;
-      note = `还要约 ${fmtRemain(t.finishMs - now)}，打开「村庄监工」重新导入一次，就能续上精确提醒`;
-    }
+    if (at - now > MAX_DELAY_MS) { at = now + MAX_DELAY_MS; isLong = true; longOnes++; }
     if (at - now < MIN_DELAY_MS) at = now + MIN_DELAY_MS;
+    plan.push({ t, at, isLong });
+  }
 
-    if (alreadyScheduled(t, at)) continue;
+  // 2) 和已有排程对齐：没变的保留，变了/消失的撤回
+  const existing = state.scheduled.filter(s => s && s.topic === state.config.topic && s.at > now);
+  const byKey = {};
+  for (const s of existing) (byKey[s.key] = byKey[s.key] || []).push(s);
 
-    // 同一任务的旧排程（时间不同）先撤回，避免“第一瓶结束”这种中途提醒
-    const stale = state.scheduled.filter(s => s && s.key === t.key
-      && s.topic === state.config.topic && s.at > now && Math.abs(s.at - at) >= 10 * 60000);
-    for (const old of stale) {
-      await cancelMessage(old.id);
-      state.scheduled = state.scheduled.filter(x => x !== old);
+  const keep = [];
+  const todo = [];
+  for (const p of plan) {
+    const olds = byKey[p.t.key] || [];
+    const same = olds.find(s => Math.abs(s.at - p.at) < 10 * 60000);
+    if (same) {
+      keep.push(same);
+      byKey[p.t.key] = olds.filter(s => s !== same);
+    } else {
+      todo.push(p);
     }
+  }
 
+  if (!partial) {
+    for (const key of Object.keys(byKey)) {
+      for (const s of byKey[key]) {
+        const ok = await cancelMessage(s.id);
+        if (!ok) cancelFail++;
+      }
+    }
+  }
+  state.scheduled = keep;
+
+  // 3) 只给新增/时间变了的任务发排程
+  for (const p of todo) {
+    const t = p.t, at = p.at, isLong = p.isLong;
+    const note = isLong
+      ? `还要约 ${fmtRemain(t.finishMs - now)}，打开「村庄监工」重新导入一次，就能续上精确提醒`
+      : '升级完成，可以上线了';
     const title = isLong
       ? `⏳ ${displayName(t)} 还没好，记得刷新排程`
       : t.cooldown
@@ -1207,25 +1223,25 @@ async function scheduleAll(force) {
         ? `${displayName(t)} 的加速效果已经结束`
         : `${t.groupLabel}${t.lvl && !t.cooldown ? ' · 升到 Lv' + (t.lvl + 1) : ''} · ${note}`;
 
-    const r = await send({
+    const payload = {
       title, message: body + '\n（' + APP_VERSION + '）',
       tags: isLong ? 'hourglass' : 'tada,castle',
       priority: isLong ? 3 : 4,
       at
-    });
+    };
+    let r = await send(payload);
+    // 撞到限速（429）就等 6 秒重试一次
+    if (r && r.status === 429) {
+      await new Promise(x => setTimeout(x, 6000));
+      r = await send(payload);
+    }
     if (r && r.ok) {
       state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '' });
       sent++;
     }
-    state.schedLog.push({
-      t: Date.now(),
-      name: displayName(t),
-      at,
-      ok: !!(r && r.ok),
-      id: (r && r.id) || ''
-    });
+    state.schedLog.push({ t: Date.now(), name: displayName(t), at, ok: !!(r && r.ok), id: (r && r.id) || '' });
     if (state.schedLog.length > 20) state.schedLog = state.schedLog.slice(-20);
-    await new Promise(r => setTimeout(r, 40)); // 别撞 ntfy 限速，也别让用户等太久
+    await new Promise(x => setTimeout(x, 120));
   }
 
   state.lastRun = { sent, fail: cancelFail, at: Date.now() };
