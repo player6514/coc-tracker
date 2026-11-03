@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v45';
+const APP_VERSION = 'v46';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -1231,11 +1231,10 @@ async function scheduleAll(force) {
       at
     };
     let r = await send(payload);
-    // 撞到限速（429）：退避重试，最多 3 次
-    const waits = [15000, 30000, 60000];
-    for (const w of waits) {
-      if (!(r && r.status === 429)) break;
-      await new Promise(x => setTimeout(x, w));
+    // 撞到限速（429）：放慢节奏重试——每 7 秒试一次，最多 12 次（约 84 秒）
+    // 桶每 5 秒回 1 个额度，这个节奏能一直等到有额度
+    for (let tries = 0; r && r.status === 429 && tries < 12; tries++) {
+      await new Promise(x => setTimeout(x, 7000));
       r = await send(payload);
     }
     if (r && r.ok) {
