@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v44';
+const APP_VERSION = 'v45';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -860,7 +860,8 @@ function render() {
       const rows = state.schedLog.slice().reverse().slice(0, 20).map(x => {
         const tm = new Date(x.t);
         const hh = String(tm.getHours()).padStart(2, '0') + ':' + String(tm.getMinutes()).padStart(2, '0');
-        return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${x.ok ? '✅' : '❌失败'}</div>`;
+        const tag = x.ok ? '✅' : (x.limited ? '⛔ 限速' : '❌ 失败');
+        return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${tag}</div>`;
       }).join('');
       const lr = state.lastRun;
       const head = lr
@@ -1230,16 +1231,19 @@ async function scheduleAll(force) {
       at
     };
     let r = await send(payload);
-    // 撞到限速（429）就等 6 秒重试一次
-    if (r && r.status === 429) {
-      await new Promise(x => setTimeout(x, 6000));
+    // 撞到限速（429）：退避重试，最多 3 次
+    const waits = [15000, 30000, 60000];
+    for (const w of waits) {
+      if (!(r && r.status === 429)) break;
+      await new Promise(x => setTimeout(x, w));
       r = await send(payload);
     }
     if (r && r.ok) {
       state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '' });
       sent++;
     }
-    state.schedLog.push({ t: Date.now(), name: displayName(t), at, ok: !!(r && r.ok), id: (r && r.id) || '' });
+    state.schedLog.push({ t: Date.now(), name: displayName(t), at, ok: !!(r && r.ok),
+      limited: !!(r && r.status === 429), status: (r && r.status) || 0, id: (r && r.id) || '' });
     if (state.schedLog.length > 20) state.schedLog = state.schedLog.slice(-20);
     await new Promise(x => setTimeout(x, 120));
   }
