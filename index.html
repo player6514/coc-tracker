@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v46';
+const APP_VERSION = 'v47';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -847,7 +847,8 @@ function render() {
             ? '⚠️ 这段有加速在生效却只测到 1.0×：说明存档已算过加速，应把「折算」关掉'
             : '这次比对期间没有加速在生效，1.0× 是正常的（不代表存档已含加速）')
         : `有加速在生效，实测约 ${top.rate.toFixed(1)}×：存档给的是未加速的工作量，折算保持开启`);
-      mbox.innerHTML = `<div style="border-top:1px solid var(--line);padding-top:14px"><h2>📐 实测速率（两次存档对比）</h2>${rows}<div class="hint" style="margin-top:8px;color:var(--muted)">${note}</div></div>`;
+      const sendInfo = window.__lastSend ? `<div class="hint" style="margin-top:8px;color:var(--warn)">上次发送：${window.__lastSend.status ? 'HTTP ' + window.__lastSend.status : '无响应'}（${window.__lastSend.stage || ''}）${window.__lastSend.error ? ' ' + window.__lastSend.error : ''}</div>` : '';
+      mbox.innerHTML = `<div style="border-top:1px solid var(--line);padding-top:14px"><h2>📐 实测速率（两次存档对比）</h2>${rows}<div class="hint" style="margin-top:8px;color:var(--muted)">${note}</div>${sendInfo}</div>`;
     } else {
       mbox.innerHTML = '';
     }
@@ -1107,14 +1108,23 @@ async function send(opts) {
       try { const j = await res.json(); id = (j && j.id) || ''; } catch (e) {}
       return { ok: true, id, status: res.status };
     }
-    return { ok: false, id: '', status: res ? res.status : 0 };
-  } catch (e) {
-    // 被 CORS 拦下时退回 no-cors：消息照样发，只是拿不到 id
+    // 非 2xx：记下状态，并尝试 no-cors 兜底（有些环境读不到响应头）
+    window.__lastSend = { url, status: res ? res.status : 0, stage: 'cors' };
     try {
       await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
-      return { ok: true, id: '' };
+      return { ok: true, id: '', status: res ? res.status : 0, fallback: true };
+    } catch (e3) {
+      return { ok: false, id: '', status: res ? res.status : 0 };
+    }
+  } catch (e) {
+    // 被 CORS 拦下时退回 no-cors：消息照样发，只是拿不到 id
+    window.__lastSend = { url, error: (e && e.message) || String(e), stage: 'cors-throw' };
+    try {
+      await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+      return { ok: true, id: '', status: 0, fallback: true };
     } catch (e2) {
-      return { ok: false, id: '' };
+      window.__lastSend = { url, error: (e2 && e2.message) || String(e2), stage: 'no-cors-throw' };
+      return { ok: false, id: '', status: 0 };
     }
   }
 }
@@ -1467,7 +1477,12 @@ function bindEvents() {
       tags: 'white_check_mark,castle',
       priority: 4
     });
-    toast(r && r.ok ? '已发送，看看手机通知栏' : '发送失败，检查网络');
+    if (r && r.ok) {
+      toast(r.fallback ? '已发送（后端没返回确认，但请求已发出）' : '已发送，看看手机通知栏');
+    } else {
+      const d = window.__lastSend || {};
+      toast('失败：' + (d.status ? 'HTTP ' + d.status : (d.error || '未知')) + ' / ' + (d.stage || ''));
+    }
   };
 
   $('btnReparse').onclick = () => {
