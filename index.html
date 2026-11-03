@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v47';
+const APP_VERSION = 'v48';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -1108,14 +1108,9 @@ async function send(opts) {
       try { const j = await res.json(); id = (j && j.id) || ''; } catch (e) {}
       return { ok: true, id, status: res.status };
     }
-    // 非 2xx：记下状态，并尝试 no-cors 兜底（有些环境读不到响应头）
+    // 非 2xx：直接算失败（429 就是被限速，no-cors 重发也没用）
     window.__lastSend = { url, status: res ? res.status : 0, stage: 'cors' };
-    try {
-      await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
-      return { ok: true, id: '', status: res ? res.status : 0, fallback: true };
-    } catch (e3) {
-      return { ok: false, id: '', status: res ? res.status : 0 };
-    }
+    return { ok: false, id: '', status: res ? res.status : 0 };
   } catch (e) {
     // 被 CORS 拦下时退回 no-cors：消息照样发，只是拿不到 id
     window.__lastSend = { url, error: (e && e.message) || String(e), stage: 'cors-throw' };
@@ -1174,7 +1169,7 @@ async function scheduleAll(force) {
 
   const prevRun = state.lastRun || null;
   state.schedLog = [];
-  let sent = 0, longOnes = 0;
+  let sent = 0, longOnes = 0, limited = false;
 
   // 1) 先算出每条任务的目标时间
   const plan = [];
@@ -1241,11 +1236,9 @@ async function scheduleAll(force) {
       at
     };
     let r = await send(payload);
-    // 撞到限速（429）：放慢节奏重试——每 7 秒试一次，最多 12 次（约 84 秒）
-    // 桶每 5 秒回 1 个额度，这个节奏能一直等到有额度
-    for (let tries = 0; r && r.status === 429 && tries < 12; tries++) {
-      await new Promise(x => setTimeout(x, 7000));
-      r = await send(payload);
+    if (r && r.status === 429) {
+      limited = true;
+      break;   // 被限速就整轮停下，继续试只会把额度越耗越光
     }
     if (r && r.ok) {
       state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '' });
@@ -1264,9 +1257,11 @@ async function scheduleAll(force) {
   render();
   const hint = $('settingsHint');
   if (hint) {
-    hint.textContent = (sent
-      ? `已排程 ${sent} 条通知${longOnes ? `（其中 ${longOnes} 项超过 3 天，先提醒你刷新）` : ''}。`
-      : '本次没有新的排程（已经排过，或没有进行中的任务）。') +
+    hint.textContent = (limited
+      ? '⚠️ 被 ntfy 限速（429），本轮已中止。请等 5~10 分钟再点「重新排程」，这期间别再点测试。'
+      : sent
+        ? `已排程 ${sent} 条通知${longOnes ? `（其中 ${longOnes} 项超过 3 天，先提醒你刷新）` : ''}。`
+        : '本次没有新的排程（已经排过，或没有进行中的任务）。') +
       (cancelFail ? `\n有 ${cancelFail} 条旧提醒撤回失败（浏览器限制），可能会重复收到。` : '');
   }
   return { sent, longOnes };
@@ -1521,7 +1516,8 @@ if ($('verText')) $('verText').textContent = `村庄监工 ${APP_VERSION} · 构
 render();
 
 // 换了新版本：按新版规则把排程重建一遍（带新版号，旧排程会被撤回）
-if (NEED_RESCHED && state.snapshot && state.snapshot.raw) {
+const _lastRunAt = (state.lastRun && state.lastRun.at) ? state.lastRun.at : 0;
+if (NEED_RESCHED && state.snapshot && state.snapshot.raw && Date.now() - _lastRunAt > 10 * 60000) {
   RESCHED_TIMER = setTimeout(() => {
     RESCHED_TIMER = null;
     doParse(state.snapshot.raw, true);
