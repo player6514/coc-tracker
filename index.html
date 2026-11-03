@@ -199,6 +199,12 @@
         </div>
       </div>
 
+      <div class="hint" style="margin-top:10px">助手加速是否计入完成时间</div>
+      <div class="seg" id="segHelper" style="margin-top:6px">
+        <button data-ha="0">不计入（保守）</button>
+        <button data-ha="1">计入</button>
+      </div>
+
       <div class="hint" style="margin-top:10px">药水/大餐到点时是否提醒</div>
       <div class="seg" id="segNotifyBoost" style="margin-top:6px">
         <button data-nb="1">提醒</button>
@@ -255,7 +261,8 @@ const GROUP_DEFS = [
   { key: 'equipment',      label: '英雄装备' },
   { key: 'helpers',        label: '帮手' },
   { key: 'guardians',      label: '守护者' },
-  { key: 'boost',          label: '加速' }
+  { key: 'boost',          label: '加速' },
+  { key: 'helperboost',    label: '助手协助' }
 ];
 
 const UNIT_NAMES = {
@@ -313,7 +320,7 @@ const ICON_BY_GROUP = {
   buildings: '🏗️', traps: '🪤', heroes: '🦸', pets: '🐾',
   units: '⚔️', spells: '✨', siege_machines: '🚚', equipment: '🛡️',
   buildings2: '🏗️', traps2: '🪤', heroes2: '🦸', units2: '⚔️',
-  helpers: '🤝', guardians: '🗿', boost: '⚡'
+  helpers: '🤝', guardians: '🗿', boost: '⚡', helperboost: '🧑‍🔧'
 };
 
 // 倍率取自游戏道具说明原文（clash-of-clans-data）
@@ -338,6 +345,38 @@ function applyBoost(baseSec, boostSec, mult) {
   const capacity = boostSec * mult;
   if (baseSec <= capacity) return baseSec / mult;
   return boostSec + (baseSec - capacity);
+}
+
+// 按“额外工人/加速”分段模拟完工时间
+// adds: [{ sec: 剩余秒数, add: 额外倍率(不含基础 1) }]
+function finishSeconds(W, adds) {
+  const pts = [0];
+  for (const a of adds) if (a.sec > 0 && a.sec !== Infinity) pts.push(a.sec);
+  pts.sort((x, y) => x - y);
+  let left = W, t = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const start = pts[i];
+    const end = (i + 1 < pts.length) ? pts[i + 1] : Infinity;
+    const rate = 1 + adds.filter(a => a.sec > start).reduce((s, a) => s + a.add, 0);
+    if (rate <= 0) return Infinity;
+    const span = (end === Infinity) ? (left / rate) : Math.min(end - start, left / rate);
+    left -= span * rate;
+    t += span;
+    if (left <= 1e-6) return t;
+  }
+  return t;
+}
+
+// 顺序模型：按优先级依次消耗（药水 → 助手 → 1 倍）
+function finishSequential(W, segs) {
+  let left = W, t = 0;
+  for (const s of segs) {
+    const cap = (s.sec === Infinity) ? Infinity : s.sec * s.rate;
+    if (left <= cap) return t + left / s.rate;
+    left -= cap;
+    if (s.sec !== Infinity) t += s.sec;
+  }
+  return t + left;
 }
 
 function boostKindOf(key) {
@@ -396,6 +435,20 @@ function parseVillage(raw, mults, boostOn, manual) {
   if (!data || typeof data !== 'object') throw new Error('不是有效的 JSON 对象');
 
   const snapshotMs = Number(data.timestamp) > 0 ? Number(data.timestamp) * 1000 : Date.now();
+
+  // 帮手：workRate 就等于等级（学徒最高 8×，实验室助手最高 12×）
+  const helperRates = {};
+  for (const hh of (Array.isArray(data.helpers) ? data.helpers : [])) {
+    helperRates[Number(hh.data)] = Number(hh.lvl) || 0;
+  }
+  const APPRENTICE_RATE = helperRates[93000000] || 0;
+  const LAB_RATE = helperRates[93000001] || 0;
+  const helperCooldowns = {};
+  for (const hh of (Array.isArray(data.helpers) ? data.helpers : [])) {
+    helperCooldowns[Number(hh.data)] = Number(hh.helper_cooldown) || 0;
+  }
+  const APPRENTICE_CD = helperCooldowns[93000000] || 82800;
+  const LAB_CD = helperCooldowns[93000001] || 82800;
   const tasks = [];
   const seen = {};
   let scanned = 0;
@@ -409,9 +462,22 @@ function parseVillage(raw, mults, boostOn, manual) {
       const id = Number(entry.data || entry.id || 0);
 
       if (Number(entry.timer) > 0) {
-        tasks.push(makeTask({
+        const task = makeTask({
           group: def.key, id, lvl: Number(entry.lvl) || 0,
           remainingSec: Number(entry.timer), snapshotMs, seen
+        });
+        if (Number(entry.helper_timer) > 0) {
+          task.helperSec = Number(entry.helper_timer);
+          task.helperRecurrent = !!entry.helper_recurrent;
+        }
+        tasks.push(task);
+      }
+      if (Number(entry.helper_timer) > 0) {
+        const isLab = def.key === 'units' || def.key === 'spells' || def.key === 'siege_machines';
+        tasks.push(makeTask({
+          group: 'helperboost', id, lvl: Number(entry.lvl) || 0,
+          remainingSec: Number(entry.helper_timer), snapshotMs, cooldown: true,
+          name: isLab ? '实验室助手 协助中' : '建筑工人学徒 协助中'
         }));
       }
       if (Number(entry.helper_cooldown) > 0) {
@@ -425,14 +491,15 @@ function parseVillage(raw, mults, boostOn, manual) {
 
   // 加速 / 药水 / 冷却：在整个存档里找形如 *_potion / *_consumable / *_cooldown 的秒数
   const BOOST_KEY_RE = /(potion|consumable|boost|cooldown|_left|_remaining|_timer)/i;
-  const SKIP_KEYS = { timer: 1, helper_cooldown: 1, timestamp: 1, clocktower_cooldown: 1 };
+  const SKIP_KEYS = { timer: 1, helper_cooldown: 1, timestamp: 1, clocktower_cooldown: 1, clocktower_boost: 1 };
+  const SKIP_KEY_RE = /clocktower|clock_tower/i;
   const usedPaths = {};
   (function scanBoosts(node, path) {
     if (!node || typeof node !== 'object' || Array.isArray(node)) return;
     for (const key of Object.keys(node)) {
       const val = node[key];
       if (val && typeof val === 'object') { scanBoosts(val, path ? path + '.' + key : key); continue; }
-      if (SKIP_KEYS[key]) continue;
+      if (SKIP_KEYS[key] || SKIP_KEY_RE.test(key)) continue;
       if (!BOOST_KEY_RE.test(key)) continue;
       const sec = Number(val);
       if (!(sec > 0)) continue;
@@ -507,18 +574,46 @@ function parseVillage(raw, mults, boostOn, manual) {
     }
   }
   for (const t of tasks) {
-    if (t.group === 'boost' || t.cooldown) continue;
+    if (t.group === 'boost' || t.group === 'helperboost' || t.cooldown) continue;
     const kind = taskKindOf(t);
     if (!kind) continue;
     const b = byKind[kind];
-    if (!b) continue;
     const base = t.remainingSec;
-    const eff = applyBoost(base, b.sec, b.mult);
+    const segs = [];
+    if (b) segs.push({ sec: b.sec, rate: b.mult });
+
+    // 助手：额外一个限时 N 倍速的工人；持续指派按每天 1 小时折算
+    const hRate = (mults && mults.__helper === false) ? 0
+      : (kind === 'builder' ? APPRENTICE_RATE : (kind === 'research' ? LAB_RATE : 0));
+    let helperRate = 0;
+    if (hRate > 0) {
+      if (t.helperRecurrent) {
+        // 持续指派：先干完当前这一轮，然后「冷却 -> 再干 1 小时」循环
+        const assistSec = t.helperSec > 0 ? t.helperSec : 3600;
+        const cd = kind === 'builder' ? APPRENTICE_CD : LAB_CD;
+        segs.push({ sec: assistSec, rate: 1 + hRate });
+        for (let i = 0; i < 12; i++) {
+          segs.push({ sec: cd, rate: 1 });
+          segs.push({ sec: 3600, rate: 1 + hRate });
+        }
+        helperRate = hRate;
+      } else if (t.helperSec > 0) {
+        segs.push({ sec: t.helperSec, rate: 1 + hRate });
+        helperRate = hRate;
+      }
+    }
+
+    if (!segs.length) continue;
+    const eff = finishSequential(base, segs);
+    if (!isFinite(eff)) continue;
     t.baseSec = base;
-    t.boostMult = b.mult;
-    t.boostName = b.name;
-    t.boostCount = b.count || 1;
-    t.boostEndMs = snapshotMs + b.sec * 1000;
+    t.helperRate = helperRate;
+    if (b) {
+      t.boostMult = b.mult;
+      t.boostName = b.name;
+      t.boostCount = b.count || 1;
+      t.boostEndMs = snapshotMs + b.sec * 1000;
+    }
     t.remainingSec = eff;
     t.finishMs = t.finishMs - (base - eff) * 1000;
   }
@@ -590,7 +685,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v28';
+const APP_VERSION = 'v35';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -617,6 +712,7 @@ let state = {
     mults: Object.assign({}, DEFAULT_MULTS),
     boost: true,
     notifyBoost: true,
+    helperAssist: true,
     stackMode: 'max',
     manualBoost: { min: 0, kind: 'builder' }
   }, load(LS.config, {})),
@@ -639,7 +735,7 @@ function migrateSnapshot() {
   if (!s || !s.raw || s.v === APP_VERSION) return;
   NEED_RESCHED = true;
   try {
-    const mset = Object.assign({ __mode: state.config.stackMode || 'max' }, state.config.mults);
+    const mset = Object.assign({ __mode: state.config.stackMode || 'max', __helper: state.config.helperAssist === true }, state.config.mults);
     const p = parseVillage(s.raw, mset, state.config.boost !== false, state.config.manualBoost);
     state.snapshot = {
       tag: p.tag, snapshotMs: p.snapshotMs, scanned: p.scanned,
@@ -673,7 +769,7 @@ const TAB_EMPTY = {
   home: '主世界没有正在升级的项目',
   lab: '战宠、兵种、法术都没有在升级',
   helper: '帮手小屋没有在冷却的助手',
-  boost: '没有正在生效的加速'
+  boost: '没有正在生效的加速或助手协助'
 };
 
 function inTab(tab, t) {
@@ -681,7 +777,7 @@ function inTab(tab, t) {
   if (tab === 'lab') return t.group === 'pets' || t.group === 'units' || t.group === 'spells'
     || t.group === 'siege_machines' || t.group === 'equipment';
   if (tab === 'helper') return (t.group === 'helpers' || t.group === 'guardians') && t.cooldown;
-  return t.group === 'boost';
+  return t.group === 'boost' || t.group === 'helperboost';
 }
 
 /* ---------- 渲染 ---------- */
@@ -817,9 +913,11 @@ function taskHtml(t, now, isDone) {
         ? `<span class="pill ok">已排程</span>`
         : `<span class="pill">待排程</span>`);
 
-  const boostTip = (!t.baseSec || isDone) ? '' : (t.boostEndMs > now
-    ? `<div class="fin" style="color:var(--accent)">${t.boostMult}× 加速 · 原本 ${fmtRemain(t.baseSec * 1000)}${t.boostCount > 1 ? ' · 同时 ' + t.boostCount + ' 个加速' : ''}</div>`
-    : `<div class="fin" style="color:var(--muted)">加速已结束（曾 ${t.boostMult}×）· 原本 ${fmtRemain(t.baseSec * 1000)}</div>`);
+  const boostParts = [];
+  if (t.boostMult) boostParts.push(t.boostMult + '× 加速');
+  if (t.helperRate) boostParts.push('助手 ' + t.helperRate + '×');
+  const boostTip = (!t.baseSec || isDone || !boostParts.length) ? ''
+    : `<div class="fin" style="color:var(--accent)">${boostParts.join(' · ')} · 原本 ${fmtRemain(t.baseSec * 1000)}</div>`;
 
   return `<div class="task ${isDone ? 'done' : ''} ${soon ? 'soon' : ''}">
     <div class="top">
@@ -878,7 +976,7 @@ function doParse(text, force) {
   if (!text || !text.trim()) { toast('先粘贴 JSON'); return; }
   let parsed;
   try {
-    const mset = Object.assign({ __mode: state.config.stackMode || 'max' }, state.config.mults);
+    const mset = Object.assign({ __mode: state.config.stackMode || 'max', __helper: state.config.helperAssist === true }, state.config.mults);
     parsed = parseVillage(text, mset, state.config.boost !== false, state.config.manualBoost);
   } catch (e) {
     const len = String(text).length;
@@ -1065,12 +1163,12 @@ async function scheduleAll(force) {
     const title = isLong
       ? `⏳ ${displayName(t)} 还没好，记得刷新排程`
       : t.cooldown
-        ? (t.group === 'boost' ? `⏰ ${displayName(t)} 这一瓶结束` : `⏰ ${displayName(t)} 冷却结束`)
+        ? (t.group === 'boost' ? `⏰ ${displayName(t)} 已结束` : `⏰ ${displayName(t)} 冷却结束`)
         : `✅ ${displayName(t)}${t.lvl ? ' Lv' + t.lvl + '→' + (t.lvl + 1) : ''} 完成`;
     const body = isLong
       ? `${displayName(t)} 剩余约 ${fmtRemain(t.finishMs - now)}。\n${note}`
       : t.group === 'boost'
-        ? `${displayName(t)} 这一瓶已经到时间了。如果还排着下一瓶，加速会继续，游戏里看剩余即可。`
+        ? `${displayName(t)} 的加速效果已经结束`
         : `${t.groupLabel}${t.lvl && !t.cooldown ? ' · 升到 Lv' + (t.lvl + 1) : ''} · ${note}`;
 
     const r = await send({
@@ -1124,6 +1222,9 @@ function openSettings() {
   });
   document.querySelectorAll('#segNotifyBoost button').forEach(b => {
     b.classList.toggle('on', (b.dataset.nb === '1') === (state.config.notifyBoost !== false));
+  });
+  document.querySelectorAll('#segHelper button').forEach(b => {
+    b.classList.toggle('on', (b.dataset.ha === '1') === (state.config.helperAssist === true));
   });
   if ($('manualBoostMin')) $('manualBoostMin').value = Number(state.config.manualBoost.min) || 0;
   if ($('manualBoostKind')) $('manualBoostKind').value = state.config.manualBoost.kind || 'builder';
@@ -1247,6 +1348,15 @@ function bindEvents() {
       save(LS.config, state.config);
     };
   }
+
+  document.querySelectorAll('#segHelper button').forEach(b => {
+    b.onclick = () => {
+      state.config.helperAssist = b.dataset.ha === '1';
+      save(LS.config, state.config);
+      document.querySelectorAll('#segHelper button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+    };
+  });
 
   document.querySelectorAll('#segNotifyBoost button').forEach(b => {
     b.onclick = () => {
