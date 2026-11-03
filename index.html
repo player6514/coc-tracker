@@ -307,6 +307,7 @@ const BOOST_LABELS = {
   builder_boost: '建筑工人药水',
   research_potion: '研究药水',
   research_boost: '研究药水',
+  lab_boost: '研究药水',
   pet_potion: '战宠药水',
   pet_boost: '战宠药水',
   hero_potion: '英雄药水',
@@ -334,6 +335,7 @@ const DEFAULT_MULTS = {
   research_consumable: 4,
   research_potion: 24,
   research_boost: 24,
+  lab_boost: 24,
   pet_consumable: 4,
   pet_potion: 24,
   pet_boost: 24
@@ -574,7 +576,14 @@ function parseVillage(raw, mults, boostOn, manual) {
     if (t.group !== 'boost') continue;
     const key = String(t.id).split('.').pop();
     const kind = boostKindOf(key);
-    const m = Number(M[key]);
+    let m = Number(M[key]);
+    if (!(m > 1) && kind) {
+      // 没登记的字段名：药水按 10/24，点心(consumable/snack)按 2/4
+      const isSnack = /consumable|snack/i.test(key);
+      if (kind === 'builder') m = isSnack ? 2 : 10;
+      else if (kind === 'research') m = isSnack ? 4 : 24;
+      else m = isSnack ? 2 : 24;
+    }
     if (BOOST_ON && kind && m > 1 && t.remainingSec > 0) {
       active.push({ kind, sec: t.remainingSec, mult: m, name: t.name });
     }
@@ -707,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v41';
+const APP_VERSION = 'v43';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
