@@ -367,16 +367,44 @@ function finishSeconds(W, adds) {
   return t;
 }
 
-// 顺序模型：按优先级依次消耗（药水 → 助手 → 1 倍）
-function finishSequential(W, segs) {
-  let left = W, t = 0;
-  for (const s of segs) {
-    const cap = (s.sec === Infinity) ? Infinity : s.sec * s.rate;
-    if (left <= cap) return t + left / s.rate;
-    left -= cap;
-    if (s.sec !== Infinity) t += s.sec;
+// 完整模拟：药水先跑，再按助手状态逐段推进，最后一件活没干完就按比例收尾
+function simulateFinish(W, opts) {
+  let left = W, t = 0, assist = 0;
+
+  if (opts.potion) {
+    const p = opts.potion;
+    const cap = p.sec * p.rate;
+    if (left <= cap) return { t: t + left / p.rate, assist };
+    left -= cap; t += p.sec;
   }
-  return t + left;
+
+  const hb = opts.helper;
+  if (!hb) return { t: t + left, assist };
+
+  // 当前正在协助：干完这一轮（可能中途完成）
+  if (hb.sec > 0) {
+    const cap = hb.sec * hb.rate;
+    if (left <= cap) {
+      const used = left / hb.rate;
+      return { t: t + used, assist: assist + used };
+    }
+    left -= cap; t += hb.sec; assist += hb.sec;
+  }
+
+  if (!hb.recurrent) return { t: t + left, assist };
+
+  // 持续指派：冷却 -> 干 1 小时 -> 冷却 … 直到做完
+  for (let i = 0; i < 5000 && left > 0; i++) {
+    if (left <= hb.cd) return { t: t + left, assist };
+    left -= hb.cd; t += hb.cd;
+    const cap = 3600 * hb.rate;
+    if (left <= cap) {
+      const used = left / hb.rate;
+      return { t: t + used, assist: assist + used };
+    }
+    left -= cap; t += 3600; assist += 3600;
+  }
+  return { t: t + left, assist };
 }
 
 function boostKindOf(key) {
@@ -579,37 +607,26 @@ function parseVillage(raw, mults, boostOn, manual) {
     if (!kind) continue;
     const b = byKind[kind];
     const base = t.remainingSec;
-    const segs = [];
-    if (b) segs.push({ sec: b.sec, rate: b.mult });
-
-    // 助手：额外一个限时 N 倍速的工人；持续指派按每天 1 小时折算
     const hRate = (mults && mults.__helper === false) ? 0
       : (kind === 'builder' ? APPRENTICE_RATE : (kind === 'research' ? LAB_RATE : 0));
-    let helperRate = 0;
-    if (hRate > 0) {
-      if (t.helperRecurrent) {
-        // 持续指派：先干完当前这一轮，然后「冷却 -> 再干 1 小时」循环
-        // 助手正在冷却时，项目上没有 helper_timer，只能从“先等冷却”开始
-        const assistSec = t.helperSec > 0 ? t.helperSec : 0;
-        const cd = kind === 'builder' ? APPRENTICE_CD : LAB_CD;
-        if (assistSec > 0) segs.push({ sec: assistSec, rate: 1 + hRate });
-        else segs.push({ sec: cd, rate: 1 });
-        for (let i = 0; i < 12; i++) {
-          segs.push({ sec: cd, rate: 1 });
-          segs.push({ sec: 3600, rate: 1 + hRate });
-        }
-        helperRate = hRate;
-      } else if (t.helperSec > 0) {
-        segs.push({ sec: t.helperSec, rate: 1 + hRate });
-        helperRate = hRate;
-      }
-    }
-
-    if (!segs.length) continue;
-    const eff = finishSequential(base, segs);
+    const helperOpt = (hRate > 0 && (t.helperSec > 0 || t.helperRecurrent)) ? {
+      sec: t.helperSec > 0 ? t.helperSec : 0,
+      rate: 1 + hRate,
+      recurrent: !!t.helperRecurrent,
+      cd: kind === 'builder' ? APPRENTICE_CD : LAB_CD
+    } : null;
+    if (!b && !helperOpt) continue;
+    const sim = simulateFinish(base, {
+      potion: b ? { sec: b.sec, rate: b.mult } : null,
+      helper: helperOpt
+    });
+    const eff = sim.t;
+    const helperRate = helperOpt ? hRate : 0;
+    const helperSessions = sim.assist > 0 ? sim.assist / 3600 : 0;
     if (!isFinite(eff)) continue;
     t.baseSec = base;
     t.helperRate = helperRate;
+    t.helperSessions = helperSessions;
     if (b) {
       t.boostMult = b.mult;
       t.boostName = b.name;
@@ -687,7 +704,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v36';
+const APP_VERSION = 'v40';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -917,7 +934,12 @@ function taskHtml(t, now, isDone) {
 
   const boostParts = [];
   if (t.boostMult) boostParts.push(t.boostMult + '× 加速');
-  if (t.helperRate) boostParts.push('助手 ' + t.helperRate + '×');
+  if (t.helperSessions > 0) {
+    const isLabTask = t.group === 'units' || t.group === 'spells' || t.group === 'siege_machines';
+    boostParts.push(isLabTask
+      ? '实验室助手 ' + t.helperSessions.toFixed(2) + '次'
+      : '学徒 ' + t.helperRate + '倍速');
+  }
   const boostTip = (!t.baseSec || isDone || !boostParts.length) ? ''
     : `<div class="fin" style="color:var(--accent)">${boostParts.join(' · ')} · 原本 ${fmtRemain(t.baseSec * 1000)}</div>`;
 
