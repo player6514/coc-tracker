@@ -468,8 +468,8 @@ function parseVillage(raw, mults, boostOn, manual) {
         });
         if (Number(entry.helper_timer) > 0) {
           task.helperSec = Number(entry.helper_timer);
-          task.helperRecurrent = !!entry.helper_recurrent;
         }
+        if (entry.helper_recurrent) task.helperRecurrent = true;
         tasks.push(task);
       }
       if (Number(entry.helper_timer) > 0) {
@@ -589,9 +589,11 @@ function parseVillage(raw, mults, boostOn, manual) {
     if (hRate > 0) {
       if (t.helperRecurrent) {
         // 持续指派：先干完当前这一轮，然后「冷却 -> 再干 1 小时」循环
-        const assistSec = t.helperSec > 0 ? t.helperSec : 3600;
+        // 助手正在冷却时，项目上没有 helper_timer，只能从“先等冷却”开始
+        const assistSec = t.helperSec > 0 ? t.helperSec : 0;
         const cd = kind === 'builder' ? APPRENTICE_CD : LAB_CD;
-        segs.push({ sec: assistSec, rate: 1 + hRate });
+        if (assistSec > 0) segs.push({ sec: assistSec, rate: 1 + hRate });
+        else segs.push({ sec: cd, rate: 1 });
         for (let i = 0; i < 12; i++) {
           segs.push({ sec: cd, rate: 1 });
           segs.push({ sec: 3600, rate: 1 + hRate });
@@ -685,7 +687,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v35';
+const APP_VERSION = 'v36';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
