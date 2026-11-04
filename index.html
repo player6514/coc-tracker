@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v54';
+const APP_VERSION = 'v55';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -938,6 +938,18 @@ function render() {
     el.addEventListener('click', () => dismissTask(el.dataset.key));
   });
 }
+// 把排程的 key（buildings:1000019:16:up）转成可读名字，用于撤回列表
+function prettyKey(key) {
+  const parts = String(key || '').split(':');
+  if (parts[0] === 'boost' || parts[0] === 'helperboost') {
+    const k = (parts[1] || '').split('.').pop();
+    return BOOST_LABELS[k] || k;
+  }
+  const id = Number(parts[1]);
+  if (UNIT_NAMES[id]) return UNIT_NAMES[id];
+  return '编号 ' + id;
+}
+
 function displayName(t) {
   if (t.name) return t.name;
   const custom = state.names[t.id];
@@ -957,7 +969,8 @@ function taskHtml(t, now, isDone) {
   const name = escapeHtml(displayName(t));
   const lvTxt = t.lvl ? `<span class="lv">Lv${t.lvl}${t.cooldown ? ' · 冷却' : ' → ' + (t.lvl + 1)}</span>` : '';
   const isScheduled = state.scheduled.some(s => s && s.key === t.key && s.topic === state.config.topic);
-  const schedTag = isDone ? '' :
+  const noSchedulePill = (t.group === 'helpers' || t.group === 'helperboost');
+  const schedTag = (isDone || noSchedulePill) ? '' :
     (t.finishMs - now > MAX_DELAY_MS
       ? `<span class="pill warn">长任务 · 3天后先提醒刷新</span>`
       : isScheduled
@@ -1227,7 +1240,7 @@ async function scheduleAll(force) {
     for (const key of Object.keys(byKey)) {
       for (const s of byKey[key]) {
         const ok = await cancelMessage(s.id);
-        if (ok) { canceled++; canceledNames.push(s.name || s.key); } else cancelFail++;
+        if (ok) { canceled++; canceledNames.push(s.name || prettyKey(s.key)); } else cancelFail++;
       }
     }
   }
