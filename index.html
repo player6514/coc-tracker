@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v53';
+const APP_VERSION = 'v54';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -866,24 +866,29 @@ function render() {
   // 排程日志（设置面板里）
   const sbox = $('schedLogBox');
   if (sbox) {
-    if (state.schedLog && state.schedLog.length) {
-      const rows = state.schedLog.slice().reverse().slice(0, 20).map(x => {
-        const tm = new Date(x.t);
-        const hh = String(tm.getHours()).padStart(2, '0') + ':' + String(tm.getMinutes()).padStart(2, '0');
-        const tag = x.ok ? '✅' : (x.limited ? '⛔ 限速' : '❌ 失败');
-        return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${tag}</div>`;
-      }).join('');
-      const lr = state.lastRun;
-      const head = lr
-        ? `<div class="hint" style="margin-bottom:6px">保留 ${lr.kept || 0} · 新增 ${lr.sent || 0} · 撤回 ${lr.canceled || 0}${lr.fail ? ` · 失败 ${lr.fail}` : ''}</div>`
-        : '';
-      const detail = [];
-      if (lr && lr.keptNames && lr.keptNames.length) detail.push(`<div class="hint">🟢 保留 ${lr.keptNames.length}：${escapeHtml(lr.keptNames.join('、'))}</div>`);
-      if (lr && lr.addedNames && lr.addedNames.length) detail.push(`<div class="hint">🔵 新增 ${lr.addedNames.length}：${escapeHtml(lr.addedNames.join('；'))}</div>`);
-      if (lr && lr.canceledNames && lr.canceledNames.length) detail.push(`<div class="hint">🔴 撤回 ${lr.canceledNames.length}：${escapeHtml(lr.canceledNames.join('、'))}</div>`);
-      sbox.innerHTML = `<h2>🧾 本次排程记录</h2>${head}${detail.join('')}${rows}`;
-    } else {
+    const lr = state.lastRun;
+    if (!lr) {
       sbox.innerHTML = '';
+    } else {
+      const listOf = (arr, fmt) => (arr && arr.length) ? arr.map(fmt).join('、') : '无';
+      const kept = listOf(lr.keptNames, x => escapeHtml(x));
+      const added = listOf(lr.addedNames, x => escapeHtml(x));
+      const canceled = listOf(lr.canceledNames, x => escapeHtml(x));
+      const rows = (state.schedLog && state.schedLog.length)
+        ? state.schedLog.slice().reverse().slice(0, 20).map(x => {
+            const tm = new Date(x.t);
+            const hh = String(tm.getHours()).padStart(2, '0') + ':' + String(tm.getMinutes()).padStart(2, '0');
+            const tag = x.ok ? '✅' : (x.limited ? '⛔ 限速' : '❌ 失败');
+            return `<div class="hint">${hh} ${escapeHtml(x.name)} → ${fmtClock(x.at, Date.now())} ${tag}</div>`;
+          }).join('')
+        : '';
+      sbox.innerHTML =
+        '<h2>🧾 本次排程记录</h2>' +
+        `<div class="hint" style="margin-top:6px">🟢 保留：${lr.kept || 0} 条</div><div class="hint" style="color:var(--muted);padding-left:18px">${kept}</div>` +
+        `<div class="hint" style="margin-top:6px">🔵 新增：${lr.sent || 0} 条</div><div class="hint" style="color:var(--muted);padding-left:18px">${added}</div>` +
+        `<div class="hint" style="margin-top:6px">🔴 撤回：${lr.canceled || 0} 条</div><div class="hint" style="color:var(--muted);padding-left:18px">${canceled}</div>` +
+        (lr.fail ? `<div class="hint" style="color:var(--warn)">撤回失败 ${lr.fail} 条</div>` : '') +
+        rows;
     }
   }
 
