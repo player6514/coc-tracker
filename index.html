@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v48';
+const APP_VERSION = 'v52';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -725,6 +725,7 @@ const LS = {
   names:    'coc.names.v2',
   sched:    'coc.sched.v2',
   prev:     'coc.prev.v1',
+  retry:    'coc.retry.v1',
   log:      'coc.log.v1',
   lastRun:  'coc.lastrun.v1',
   tab:      'coc.tab.v1'
@@ -756,6 +757,14 @@ let state = {
   measure: []
 };
 save(LS.config, state.config);
+
+// 上次被限速、排程没跑完：到点自动补一次
+(function replayRetry() {
+  const at = Number(load(LS.retry, 0)) || 0;
+  if (!at) return;
+  const wait = Math.max(2000, at - Date.now());
+  setTimeout(() => { try { scheduleAll(true); } catch (e) {} }, wait);
+})();
 
 // 旧版本存的数据没有原始 JSON，升级后自动重解析一次，避免看不到新字段
 let NEED_RESCHED = false;
@@ -866,7 +875,7 @@ function render() {
       }).join('');
       const lr = state.lastRun;
       const head = lr
-        ? `<div class="hint" style="margin-bottom:6px">本次成功 ${lr.sent} 条${lr.fail ? `，撤回失败 ${lr.fail} 条` : ''}</div>`
+        ? `<div class="hint" style="margin-bottom:6px">保留 ${lr.kept || 0} · 新增 ${lr.sent || 0} · 撤回 ${lr.canceled || 0}${lr.fail ? ` · 失败 ${lr.fail}` : ''}</div>`
         : '';
       sbox.innerHTML = `<h2>🧾 本次排程记录</h2>${head}${rows}`;
     } else {
@@ -1164,7 +1173,7 @@ async function scheduleAll(force) {
   //   - 任务时间变了       -> 撤回旧的重排
   //   - 任务已经不存在     -> 撤回
   const partial = !!(state.snapshot && state.snapshot.repaired);
-  let cancelFail = 0;
+  let cancelFail = 0, canceled = 0;
   const desired = {};
 
   const prevRun = state.lastRun || null;
@@ -1176,6 +1185,7 @@ async function scheduleAll(force) {
   for (const t of tasks) {
     if (t.finishMs <= now + 2000) continue;
     if (t.group === 'boost' && state.config.notifyBoost === false) continue;
+    if (t.group === 'helperboost' || t.group === 'helpers') continue;   // 帮手相关只看不提醒
 
     let at = t.finishMs - (state.config.lead || 0) * 60000;
     let isLong = false;
@@ -1206,10 +1216,11 @@ async function scheduleAll(force) {
     for (const key of Object.keys(byKey)) {
       for (const s of byKey[key]) {
         const ok = await cancelMessage(s.id);
-        if (!ok) cancelFail++;
+        if (ok) canceled++; else cancelFail++;
       }
     }
   }
+  const keptCount = keep.length;
   state.scheduled = keep;
 
   // 3) 只给新增/时间变了的任务发排程
@@ -1250,18 +1261,32 @@ async function scheduleAll(force) {
     await new Promise(x => setTimeout(x, 120));
   }
 
-  state.lastRun = { sent, fail: cancelFail, at: Date.now() };
+  state.lastRun = { sent, fail: cancelFail, kept: keptCount, canceled, at: Date.now() };
   save(LS.sched, state.scheduled);
   save(LS.log, state.schedLog);
   save(LS.lastRun, state.lastRun);
   render();
   const hint = $('settingsHint');
   if (hint) {
+    if (limited) {
+      state.retryAt = Date.now() + 6 * 60000;
+      save(LS.retry, state.retryAt);
+      setTimeout(async () => {
+        if (!state.retryAt || Date.now() < state.retryAt) return;
+        state.retryAt = 0;
+        save(LS.retry, 0);
+        await scheduleAll(true);
+      }, 6 * 60000 + 1500);
+    } else {
+      state.retryAt = 0;
+      save(LS.retry, 0);
+    }
+
     hint.textContent = (limited
       ? '⚠️ 被 ntfy 限速（429），本轮已中止。请等 5~10 分钟再点「重新排程」，这期间别再点测试。'
-      : sent
-        ? `已排程 ${sent} 条通知${longOnes ? `（其中 ${longOnes} 项超过 3 天，先提醒你刷新）` : ''}。`
-        : '本次没有新的排程（已经排过，或没有进行中的任务）。') +
+      : `保留 ${keptCount} 条 · 新增 ${sent} 条 · 撤回 ${canceled} 条` +
+        (longOnes ? `（其中 ${longOnes} 项超过 3 天，先提醒你刷新）` : '') +
+        (sent === 0 && canceled === 0 ? '（没有变化，未发任何请求）' : '')) +
       (cancelFail ? `\n有 ${cancelFail} 条旧提醒撤回失败（浏览器限制），可能会重复收到。` : '');
   }
   return { sent, longOnes };
@@ -1489,8 +1514,6 @@ function bindEvents() {
   };
 
   $('btnResched').onclick = async () => {
-    state.scheduled = [];
-    save(LS.sched, state.scheduled);
     const r = await scheduleAll(true);
     toast(`已重新排程 ${r.sent} 条`);
   };
