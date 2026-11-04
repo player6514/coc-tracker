@@ -716,7 +716,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v52';
+const APP_VERSION = 'v53';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -877,7 +877,11 @@ function render() {
       const head = lr
         ? `<div class="hint" style="margin-bottom:6px">保留 ${lr.kept || 0} · 新增 ${lr.sent || 0} · 撤回 ${lr.canceled || 0}${lr.fail ? ` · 失败 ${lr.fail}` : ''}</div>`
         : '';
-      sbox.innerHTML = `<h2>🧾 本次排程记录</h2>${head}${rows}`;
+      const detail = [];
+      if (lr && lr.keptNames && lr.keptNames.length) detail.push(`<div class="hint">🟢 保留 ${lr.keptNames.length}：${escapeHtml(lr.keptNames.join('、'))}</div>`);
+      if (lr && lr.addedNames && lr.addedNames.length) detail.push(`<div class="hint">🔵 新增 ${lr.addedNames.length}：${escapeHtml(lr.addedNames.join('；'))}</div>`);
+      if (lr && lr.canceledNames && lr.canceledNames.length) detail.push(`<div class="hint">🔴 撤回 ${lr.canceledNames.length}：${escapeHtml(lr.canceledNames.join('、'))}</div>`);
+      sbox.innerHTML = `<h2>🧾 本次排程记录</h2>${head}${detail.join('')}${rows}`;
     } else {
       sbox.innerHTML = '';
     }
@@ -1201,11 +1205,13 @@ async function scheduleAll(force) {
 
   const keep = [];
   const todo = [];
+  const keptNames = [], canceledNames = [];
   for (const p of plan) {
     const olds = byKey[p.t.key] || [];
     const same = olds.find(s => Math.abs(s.at - p.at) < 10 * 60000);
     if (same) {
       keep.push(same);
+      keptNames.push(same.name || displayName(p.t));
       byKey[p.t.key] = olds.filter(s => s !== same);
     } else {
       todo.push(p);
@@ -1216,7 +1222,7 @@ async function scheduleAll(force) {
     for (const key of Object.keys(byKey)) {
       for (const s of byKey[key]) {
         const ok = await cancelMessage(s.id);
-        if (ok) canceled++; else cancelFail++;
+        if (ok) { canceled++; canceledNames.push(s.name || s.key); } else cancelFail++;
       }
     }
   }
@@ -1252,7 +1258,7 @@ async function scheduleAll(force) {
       break;   // 被限速就整轮停下，继续试只会把额度越耗越光
     }
     if (r && r.ok) {
-      state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '' });
+      state.scheduled.push({ key: t.key, at, topic: state.config.topic, id: r.id || '', name: displayName(t) });
       sent++;
     }
     state.schedLog.push({ t: Date.now(), name: displayName(t), at, ok: !!(r && r.ok),
@@ -1261,7 +1267,13 @@ async function scheduleAll(force) {
     await new Promise(x => setTimeout(x, 120));
   }
 
-  state.lastRun = { sent, fail: cancelFail, kept: keptCount, canceled, at: Date.now() };
+  state.lastRun = {
+    sent, fail: cancelFail, kept: keptCount, canceled,
+    keptNames: keptNames.slice(0, 15),
+    addedNames: todo.filter(x => state.scheduled.some(s => s.key === x.t.key)).map(x => displayName(x.t) + ' → ' + fmtClock(x.at, Date.now())).slice(0, 15),
+    canceledNames: canceledNames.slice(0, 15),
+    at: Date.now()
+  };
   save(LS.sched, state.scheduled);
   save(LS.log, state.schedLog);
   save(LS.lastRun, state.lastRun);
