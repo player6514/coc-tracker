@@ -372,39 +372,45 @@ function finishSeconds(W, adds) {
 // 完整模拟：药水先跑，再按助手状态逐段推进，最后一件活没干完就按比例收尾
 function simulateFinish(W, opts) {
   let left = W, t = 0, assist = 0;
-
-  if (opts.potion) {
-    const p = opts.potion;
-    const cap = p.sec * p.rate;
-    if (left <= cap) return { t: t + left / p.rate, assist };
-    left -= cap; t += p.sec;
-  }
-
+  const potionMult = opts.potion ? opts.potion.rate : 1;
+  const potionSec = opts.potion ? opts.potion.sec : 0;
   const hb = opts.helper;
-  if (!hb) return { t: t + left, assist };
 
-  // 当前正在协助：干完这一轮（可能中途完成）
-  if (hb.sec > 0) {
-    const cap = hb.sec * hb.rate;
-    if (left <= cap) {
-      const used = left / hb.rate;
-      return { t: t + used, assist: assist + used };
+  // 药水与助手同时生效时：速率相加（实测 10 + 9 = 19 倍）
+  if (hb && hb.sec > 0) {
+    const both = Math.min(potionSec, hb.sec);
+    if (both > 0) {
+      const rate = potionMult + (hb.rate - 1);
+      const cap = both * rate;
+      if (left <= cap) return { t: t + left / rate, assist: assist + left / rate };
+      left -= cap; t += both; assist += both;
     }
-    left -= cap; t += hb.sec; assist += hb.sec;
+    const rest = hb.sec - both;
+    if (rest > 0) {
+      const rate = (potionSec > both) ? (potionMult + (hb.rate - 1)) : hb.rate;
+      const cap = rest * rate;
+      if (left <= cap) return { t: t + left / rate, assist: assist + left / rate };
+      left -= cap; t += rest; assist += rest;
+    }
+  } else if (potionSec > 0) {
+    const cap = potionSec * potionMult;
+    if (left <= cap) return { t: t + left / potionMult, assist };
+    left -= cap; t += potionSec;
   }
 
+  if (!hb) return { t: t + left, assist };
   if (!hb.recurrent) return { t: t + left, assist };
 
-  // 持续指派：冷却 -> 干 1 小时 -> 冷却 … 直到做完
-  // 第一次用存档里的剩余冷却；之后每轮固定 23 小时（干 1 小时 + 冷却 23 小时 = 每天一轮）
+  // 持续指派：每天 1 小时，速率 = 1 + 助手倍率
   let cd = hb.cd;
   for (let i = 0; i < 5000 && left > 0; i++) {
     if (left <= cd) return { t: t + left, assist };
     left -= cd; t += cd;
     cd = 82800;
-    const cap = 3600 * hb.rate;
+    const rate = hb.rate;
+    const cap = 3600 * rate;
     if (left <= cap) {
-      const used = left / hb.rate;
+      const used = left / rate;
       return { t: t + used, assist: assist + used };
     }
     left -= cap; t += 3600; assist += 3600;
@@ -716,7 +722,7 @@ function fmtClock(ms, nowMs) {
 //==CORE-END==
 
 /* ============================ 应用层 ============================ */
-const APP_VERSION = 'v61';
+const APP_VERSION = 'v64';
 const BUILD_DATE = '2026-11-02';
 
 const LS = {
@@ -969,7 +975,7 @@ function taskHtml(t, now, isDone) {
   const name = escapeHtml(displayName(t));
   const lvTxt = t.lvl ? `<span class="lv">Lv${t.lvl}${t.cooldown ? ' · 冷却' : ' → ' + (t.lvl + 1)}</span>` : '';
   const isScheduled = state.scheduled.some(s => s && s.key === t.key && s.topic === state.config.topic);
-  const noSchedulePill = (t.group === 'helpers' || t.group === 'helperboost');
+  const noSchedulePill = (t.group === 'helpers' || t.group === 'helperboost' || t.group === 'boost');
   const schedTag = (isDone || noSchedulePill) ? '' :
     (t.finishMs - now > MAX_DELAY_MS
       ? `<span class="pill warn">长任务 · 3天后先提醒刷新</span>`
